@@ -396,10 +396,11 @@ class EverliRegistrationBot:
             self.logger.info("Attempting to clear session before logout")
             page.run_js("window.localStorage.clear();")
             page.run_js("window.sessionStorage.clear();")
-            page.clear_cookies()
+            page.delete_all_cookies()
             self.logger.info("Cleared cookies and storage")
         except Exception as e:
             self.logger.warning(f"Error while clearing session data: {e}")
+
 
     def register_and_confirm(self) -> Optional[str]:
         page = None
