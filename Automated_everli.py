@@ -118,10 +118,8 @@ class HeaderManager:
                     token = f'Bearer {token}'
                 headers['authorization'] = token
         return headers
-
 class StructuredLogger:
     """CSV-only structured logger for scraper operations"""
-    
     def __init__(self, log_dir: str, scraper_name: str, source: str, schedule: str, machine_id: str, job_id: int = 1):
         self.log_dir = log_dir
         self.scraper_name = scraper_name
@@ -130,32 +128,38 @@ class StructuredLogger:
         self.machine_id = machine_id
         self.job_id = job_id
         self.start_time = time.time()
-        self.last_step_time=self.start_time
-        
-        
-        # Create log directory
+        self.last_step_time = self.start_time
+        self.machine_ip = self._get_machine_ip()
         os.makedirs(log_dir, exist_ok=True)
-        
-        # Setup CSV logger only
         self.csv_log_path = os.path.join(log_dir, f'scraper_logs_{datetime.now().strftime("%Y-%m-%d")}.csv')
         self._setup_csv_logger()
-        
-        # Current context tracking
         self.current_category = ""
         self.current_subcategory = ""
         self.current_product_url = ""
         self.current_status = "in_progress"
-    
+    def _get_machine_ip(self) -> str:
+        """Get the machine's IP address"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            try:
+                hostname = socket.gethostname()
+                ip = socket.gethostbyname(hostname)
+                return ip
+            except Exception:
+                return "unknown"
     def _setup_csv_logger(self):
         """Setup CSV logging with headers"""
         self.csv_fieldnames = [
             'asctime', 'levelname', 'filename', 'funcName', 'lineno',
-            'scraper_name', 'source', 'schedule', 'machine_id', 'job_id',
-            'category', 'subcategory', 'product_url', 'duration',
+            'scraper_name', 'source', 'schedule', 'machine_id', 'machine_ip', 'job_id',
+            'category', 'subcategory', 'product_url', 'duration', 'duration_from_start',
             'status', 'error_message', 'data_size', 'inconsistent_data_count', 'message'
         ]
-        
-        # Create CSV file with headers if it doesn't exist
         if not os.path.exists(self.csv_log_path):
             with open(self.csv_log_path, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=self.csv_fieldnames)
@@ -166,7 +170,6 @@ class StructuredLogger:
         import inspect
         frame = inspect.currentframe()
         try:
-            # Go up the stack to find the actual caller (skip _log_to_csv and log_* methods)
             caller_frame = frame.f_back.f_back.f_back
             if caller_frame:
                 return {
@@ -178,17 +181,34 @@ class StructuredLogger:
             del frame
         return {'filename': 'unknown', 'funcName': 'unknown', 'lineno': 0}
     
+    def _format_duration(self, total_seconds: float) -> str:
+        """Format duration as HH:MM:SS"""
+        hours = int(total_seconds // 3600)
+        minutes = int((total_seconds % 3600) // 60)
+        seconds = int(total_seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    
     def _log_to_csv(self, level: str, message: str, error_message: str = "", 
                 data_size: int = 0, inconsistent_data_count: int = 0):
         """Log structured data to CSV and print to console"""
         caller_info = self._get_caller_info()
-        total_seconds = time.time() - self.last_step_time
-        self.last_step_time=time.time()
-        minutes = int(total_seconds // 60)
-        seconds = int(total_seconds % 60)
-        duration = f"{minutes}m {seconds}s"
         
+        step_total_seconds = time.time() - self.last_step_time
+        self.last_step_time = time.time()
+        step_minutes = int(step_total_seconds // 60)
+        step_seconds = int(step_total_seconds % 60)
+        step_duration = f"{step_minutes}m {step_seconds}s"
         
+        total_seconds_from_start = time.time() - self.start_time
+        duration_from_start = self._format_duration(total_seconds_from_start)
+        final_error_message = error_message
+        should_populate_error = (
+            level in ["ERROR", "WARNING"] or 
+            any(keyword in message.lower() for keyword in [
+                'error', 'exception', 'failed', 'failure', 'timeout', 
+                'connection', 'unable', 'cannot', 'blocked', 'invalid']) )
+        if should_populate_error and not error_message:
+            final_error_message = message
         log_entry = {
             'asctime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'levelname': level,
@@ -199,29 +219,26 @@ class StructuredLogger:
             'source': self.source,
             'schedule': self.schedule,
             'machine_id': self.machine_id,
+            'machine_ip': self.machine_ip,
             'job_id': self.job_id,
             'category': self.current_category,
             'subcategory': self.current_subcategory,
             'product_url': self.current_product_url,
-            'duration': duration,
+            'duration': step_duration,
+            'duration_from_start': duration_from_start,
             'status': self.current_status,
-            'error_message': error_message,
+            'error_message': final_error_message,
             'data_size': data_size,
             'inconsistent_data_count': inconsistent_data_count,
             'message': message
         }
-        
-        # Print to console
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"{timestamp} - {level} - {message}")
-        
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')        
         try:
             with open(self.csv_log_path, 'a', newline='', encoding='utf-8') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=self.csv_fieldnames)
                 writer.writerow(log_entry)
         except Exception as e:
             print(f"Failed to write to CSV log: {e}")
-    
     def set_context(self, category: str = "", subcategory: str = "", 
                    product_url: str = "", status: str = ""):
         """Update current context for logging"""
@@ -233,7 +250,6 @@ class StructuredLogger:
             self.current_product_url = product_url
         if status:
             self.current_status = status
-    
     def log_info(self, message: str, data_size: int = 0, inconsistent_data_count: int = 0):
         """Log info level message"""
         self._log_to_csv("INFO", message, data_size=data_size, 
@@ -266,7 +282,8 @@ class StructuredLogger:
         """Log job completion"""
         self.set_context(status="ending")
         duration = round(time.time() - self.start_time, 2)
-        self.log_info(f"Job {self.job_id} completed. Total duration: {duration}s", 
+        duration_formatted = self._format_duration(duration)
+        self.log_info(f"Job {self.job_id} completed. Total duration: {duration_formatted}", 
                      data_size=total_data_size)
     
     def log_success(self, message: str, data_size: int = 0):
