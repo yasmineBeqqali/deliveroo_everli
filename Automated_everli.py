@@ -16,17 +16,37 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 import pandas as pd
 import random 
 import secrets
-from pytz import timezone
+import pytz
+from snowflake.connector import connect
+from snowflake.connector.pandas_tools import write_pandas
+from dotenv import load_dotenv
+load_dotenv()
 
-# Add timezone for Dubai if needed
-zone_dubai = timezone('Asia/Dubai')
-source_file_ID = 267162
-stores=pd.read_csv("stores.csv")
+zone_dubai = pytz.timezone('Europe/Paris') 
+user_name = 'eBench'
+device_name = 'R58TA1620HF'
+country = 'ITALY'
+src = 'Everli'
+ctry = country
+scrapper_id = '0'
+scrapper_number = '1'
+
+SNOWFLAKE_CONFIG = {
+   'user': os.getenv('SNOWFLAKE_USER'),
+   'password': os.getenv('SNOWFLAKE_PASSWORD'),
+   'role': os.getenv('SNOWFLAKE_ROLE'),
+   'account': os.getenv('SNOWFLAKE_ACCOUNT'),
+   'database': os.getenv('SNOWFLAKE_DATABASE'),
+   'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE'),
+   'schema': os.getenv('SNOWFLAKE_SCHEMA')
+}
+
 class SimplifiedTokenExtractor:    
     def __init__(self, page, logger):
         self.page = page
         self.logger = logger
         self.captured_token = None    
+    
     def extract_vauth_token_from_cookies(self) -> Optional[str]:
         try:
             self.logger.log_info("Attempting to extract vAuthToken from cookies")
@@ -45,11 +65,13 @@ class SimplifiedTokenExtractor:
         except Exception as e:
             self.logger.log_error(f"Error extracting vAuthToken from cookies: {e}")
             return None
+
 class HeaderManager:    
     def __init__(self, logger):
         self.logger = logger
         self.session_id = None
         self.device_fingerprint = None
+    
     def get_headers_for_api_call(self, 
                                 authentication_token: str,
                                 request_type: str = 'GET',
@@ -63,16 +85,19 @@ class HeaderManager:
         self.logger.log_debug(f"Auth header present: {'authorization' in base_headers}")
 
         return base_headers
+    
     def generate_device_fingerprint(self) -> str:
         """Generate a consistent device fingerprint for the session"""
         if not self.device_fingerprint:
             self.device_fingerprint = str(uuid.uuid4())
         return self.device_fingerprint
+    
     def generate_session_id(self) -> str:
         """Generate a session ID that persists across requests"""
         if not self.session_id:
             self.session_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, secrets.token_hex(8)))
         return self.session_id
+    
     def get_random_user_agent(self) -> str:
         user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
@@ -80,6 +105,7 @@ class HeaderManager:
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
         ]
         return random.choice(user_agents)
+    
     def get_random_screen_resolution(self) -> str:
         """Get a random but common screen resolution"""
         resolutions = [
@@ -87,10 +113,11 @@ class HeaderManager:
             "1280x720", "1600x900", "1024x768", "1680x1050"
         ]
         return random.choice(resolutions)
+    
     def generate_base_headers(self, authentication_token: Optional[str] = None) -> Dict[str, str]:
         """Generate base headers that should be consistent across requests"""
         headers = {
-            'accept': 'application/json, text/plain, /',
+            'accept': 'application/json, text/plain, */*',
             'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
             'if-none-match': 'W/"50d7e1bef6bfcedccfeec1e1b5e1fb9b"',
             'origin': 'https://it.everli.com',
@@ -121,7 +148,6 @@ class HeaderManager:
 
 class StructuredLogger:
     """CSV-only structured logger for scraper operations"""
-    
     def __init__(self, log_dir: str, scraper_name: str, source: str, schedule: str, machine_id: str, job_id: int = 1):
         self.log_dir = log_dir
         self.scraper_name = scraper_name
@@ -130,32 +156,40 @@ class StructuredLogger:
         self.machine_id = machine_id
         self.job_id = job_id
         self.start_time = time.time()
-        self.last_step_time=self.start_time
-        
-        
-        # Create log directory
+        self.last_step_time = self.start_time
+        self.machine_ip = self._get_machine_ip()
         os.makedirs(log_dir, exist_ok=True)
-        
-        # Setup CSV logger only
         self.csv_log_path = os.path.join(log_dir, f'scraper_logs_{datetime.now().strftime("%Y-%m-%d")}.csv')
         self._setup_csv_logger()
-        
-        # Current context tracking
         self.current_category = ""
         self.current_subcategory = ""
         self.current_product_url = ""
         self.current_status = "in_progress"
     
+    def _get_machine_ip(self) -> str:
+        """Get the machine's IP address"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            try:
+                hostname = socket.gethostname()
+                ip = socket.gethostbyname(hostname)
+                return ip
+            except Exception:
+                return "unknown"
+    
     def _setup_csv_logger(self):
         """Setup CSV logging with headers"""
         self.csv_fieldnames = [
             'asctime', 'levelname', 'filename', 'funcName', 'lineno',
-            'scraper_name', 'source', 'schedule', 'machine_id', 'job_id',
-            'category', 'subcategory', 'product_url', 'duration',
+            'scraper_name', 'source', 'schedule', 'machine_id', 'machine_ip', 'job_id',
+            'category', 'subcategory', 'product_url', 'duration', 'duration_from_start',
             'status', 'error_message', 'data_size', 'inconsistent_data_count', 'message'
         ]
-        
-        # Create CSV file with headers if it doesn't exist
         if not os.path.exists(self.csv_log_path):
             with open(self.csv_log_path, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=self.csv_fieldnames)
@@ -166,7 +200,6 @@ class StructuredLogger:
         import inspect
         frame = inspect.currentframe()
         try:
-            # Go up the stack to find the actual caller (skip _log_to_csv and log_* methods)
             caller_frame = frame.f_back.f_back.f_back
             if caller_frame:
                 return {
@@ -178,17 +211,34 @@ class StructuredLogger:
             del frame
         return {'filename': 'unknown', 'funcName': 'unknown', 'lineno': 0}
     
+    def _format_duration(self, total_seconds: float) -> str:
+        """Format duration as HH:MM:SS"""
+        hours = int(total_seconds // 3600)
+        minutes = int((total_seconds % 3600) // 60)
+        seconds = int(total_seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    
     def _log_to_csv(self, level: str, message: str, error_message: str = "", 
                 data_size: int = 0, inconsistent_data_count: int = 0):
         """Log structured data to CSV and print to console"""
         caller_info = self._get_caller_info()
-        total_seconds = time.time() - self.last_step_time
-        self.last_step_time=time.time()
-        minutes = int(total_seconds // 60)
-        seconds = int(total_seconds % 60)
-        duration = f"{minutes}m {seconds}s"
         
+        step_total_seconds = time.time() - self.last_step_time
+        self.last_step_time = time.time()
+        step_minutes = int(step_total_seconds // 60)
+        step_seconds = int(step_total_seconds % 60)
+        step_duration = f"{step_minutes}m {step_seconds}s"
         
+        total_seconds_from_start = time.time() - self.start_time
+        duration_from_start = self._format_duration(total_seconds_from_start)
+        final_error_message = error_message
+        should_populate_error = (
+            level in ["ERROR", "WARNING"] or 
+            any(keyword in message.lower() for keyword in [
+                'error', 'exception', 'failed', 'failure', 'timeout', 
+                'connection', 'unable', 'cannot', 'blocked', 'invalid']) )
+        if should_populate_error and not error_message:
+            final_error_message = message
         log_entry = {
             'asctime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'levelname': level,
@@ -199,22 +249,20 @@ class StructuredLogger:
             'source': self.source,
             'schedule': self.schedule,
             'machine_id': self.machine_id,
+            'machine_ip': self.machine_ip,
             'job_id': self.job_id,
             'category': self.current_category,
             'subcategory': self.current_subcategory,
             'product_url': self.current_product_url,
-            'duration': duration,
+            'duration': step_duration,
+            'duration_from_start': duration_from_start,
             'status': self.current_status,
-            'error_message': error_message,
+            'error_message': final_error_message,
             'data_size': data_size,
             'inconsistent_data_count': inconsistent_data_count,
             'message': message
         }
-        
-        # Print to console
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"{timestamp} - {level} - {message}")
-        
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')        
         try:
             with open(self.csv_log_path, 'a', newline='', encoding='utf-8') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=self.csv_fieldnames)
@@ -266,16 +314,19 @@ class StructuredLogger:
         """Log job completion"""
         self.set_context(status="ending")
         duration = round(time.time() - self.start_time, 2)
-        self.log_info(f"Job {self.job_id} completed. Total duration: {duration}s", 
+        duration_formatted = self._format_duration(duration)
+        self.log_info(f"Job {self.job_id} completed. Total duration: {duration_formatted}", 
                      data_size=total_data_size)
     
     def log_success(self, message: str, data_size: int = 0):
         """Log successful operation"""
         self.set_context(status="success")
         self.log_info(message, data_size=data_size)
+
 class EverliRegistrationBot: 
     MAIL_TM_API = "https://api.mail.tm"
     LOG_DIR = "Everli_logs"
+    
     def __init__(self):
         self.machine_id = socket.gethostname()
         self.job_id = str(uuid.uuid4())
@@ -292,6 +343,7 @@ class EverliRegistrationBot:
         self.session = requests.Session()  
         self.last_keep_alive = time.time()
         self._cleanup_old_logs()
+    
     def _cleanup_old_logs(self, retention_days: int = 7) -> None:
         try:
             cutoff_date = datetime.now() - timedelta(days=retention_days)
@@ -313,6 +365,7 @@ class EverliRegistrationBot:
         """Simulate human-like delays in automation."""
         delay = random.uniform(min_seconds, max_seconds)
         time.sleep(delay)
+    
     def refresh_authentication(self, max_retries: int = 3, base_delay: float = 5.0) -> bool:
         try:
             self.logger.log_info("Attempting to extend session with keep-alive request")
@@ -371,6 +424,7 @@ class EverliRegistrationBot:
         except Exception as e:
             self.logger.log_error(f"Re-registration failed: {e}")
             return False
+    
     def create_temporary_email(self) -> Tuple[str, str, str]:
         """Create a temporary email account using Mail.tm API."""
         max_retries = 3
@@ -413,6 +467,7 @@ class EverliRegistrationBot:
                 else:
                     self.logger.log_error("Failed to create temporary email after all retries")
                     raise Exception("Could not create temporary email account")
+    
     def poll_for_confirmation_email(self, email_token: str, timeout: int = 300) -> str:
         """Poll Mail.tm for confirmation email with verification link."""
         deadline = time.time() + timeout
@@ -451,6 +506,7 @@ class EverliRegistrationBot:
                 self.logger.log_warning(f"Error while polling for email: {e}")
             time.sleep(poll_interval)
         raise RuntimeError(f"No confirmation email received within {timeout} seconds")
+    
     def type_text_humanlike(self, element, text: str, delay: float = 0.1) -> None:
         """Type text into an element with human-like delays between characters."""
         try:
@@ -462,6 +518,7 @@ class EverliRegistrationBot:
         except Exception as e:
             self.logger.log_error(f"Failed to type text: {e}")
             raise
+    
     def wait_for_password_input(self, page, max_attempts: int = 10) -> object:
         """Wait for password input field to appear on the page."""
         for attempt in range(max_attempts):
@@ -478,6 +535,7 @@ class EverliRegistrationBot:
                 self.logger.log_warning(f"Error while searching for password input: {e}")
                 time.sleep(2)
         raise Exception("Password input field not found after maximum attempts")
+    
     def click_continue_with_email(self, page, max_attempts: int = 10) -> None:
         """Find and click the 'Continue with Email' button."""
         for attempt in range(max_attempts):
@@ -501,6 +559,7 @@ class EverliRegistrationBot:
                 self.logger.log_warning(f"Error clicking continue button: {e}")
                 time.sleep(2)
         raise Exception("'Continue with Email' button not found or not clickable")
+    
     def setup_browser(self) -> Tuple[ChromiumPage, str]:
         """Set up Chrome browser with temporary profile."""
         try:
@@ -517,6 +576,7 @@ class EverliRegistrationBot:
         except Exception as e:
             self.logger.log_error(f"Failed to setup browser: {e}")
             raise
+    
     def extract_token_from_page(self, page) -> Optional[str]:
         """Extract vAuthToken using the SimplifiedTokenExtractor"""
         try:
@@ -526,6 +586,7 @@ class EverliRegistrationBot:
         except Exception as e:
             self.logger.log_error(f"Error extracting token: {e}")
             return None
+    
     def logout_current_session(self, page):
         try:
             self.logger.log_info("Attempting to clear session before logout")
@@ -535,7 +596,6 @@ class EverliRegistrationBot:
             self.logger.log_success("Cleared cookies and storage")
         except Exception as e:
             self.logger.log_warning(f"Error while clearing session data: {e}")
-
 
     def register_and_confirm(self) -> Optional[str]:
         page = None
@@ -646,15 +706,11 @@ class EverliRegistrationBot:
             try:
                 confirmation_link = self.poll_for_confirmation_email(email_token)
                 self.logger.log_info(f"Following confirmation link: {confirmation_link}")
-                # Navigate to confirmation link
                 page.get(confirmation_link)
                 page.wait.load_start()
-                # Wait for initial page load
                 self.logger.log_info("Waiting for email confirmation page to load...")
                 time.sleep(5)
-                # Look for confirmation success and automatic redirect/login
                 self.logger.log_info("Waiting for automatic login after email confirmation...")
-                # Check if we're redirected to main site (logged in)
                 max_wait_time = 60  
                 login_detected = False
                 start_time = time.time()
@@ -695,6 +751,7 @@ class EverliRegistrationBot:
                 except Exception as e:
                     self.logger.log_warning(f"Error cleaning up temp profile: {e}")
         return self.authentication_token
+    
     def get_headers_for_request(self, authentication_token: str = None, endpoint_url: str = '') -> Dict[str, str]:
         """Get properly formatted headers for API requests with fresh session data."""
         token_to_use = authentication_token or self.authentication_token
@@ -710,58 +767,162 @@ class EverliRegistrationBot:
         headers['x-request-time'] = datetime.now().isoformat()
         
         return headers
+
+def get_snowflake_connection():
+    """Create and return a Snowflake connection"""
+    return connect(**SNOWFLAKE_CONFIG)
+
+def initialize_source_file():
+    """Initialize source file in Snowflake and return source_file_ID"""
+    
+    query = f"""SELECT u.*,s.Source_name, c.Country_Code 
+                from Url u 
+                left join Source s on u.Source_ID=s.Source_ID 
+                left join Country c on u.Country_ID=c.Country_ID 
+                where u.active=1 and c.Country_Code='{ctry}' and s.Source_Name='{src}';"""
+    
+    snowflake_cn = get_snowflake_connection()
+    cursor = snowflake_cn.cursor()
+    cursor.execute(query)
+    
+    df = pd.DataFrame.from_records(iter(cursor), columns=[x[0] for x in cursor.description])
+    df = df.reset_index(drop=True).reset_index()
+    
+    now = datetime.now(zone_dubai)
+    nw = str(now.year) + 'y' + str(now.month) + 'm' + str(now.day) + 'd' + ' ' + str(now.hour) + 'h' + str(now.minute) + 'm' + str(now.second) + 's'
+    f_name = nw + 'multitest' + src.replace(' ', '') + '' + ctry + '_' + scrapper_id + '.csv'
+    
+    source_1 = str(df['SOURCE_ID'].values[0])
+    country_1 = str(df['COUNTRY_ID'].values[0])
+    
+    data = pd.DataFrame({
+        'SOURCE_FILE_NAME': [f_name],
+        'SOURCE_ID': [source_1],
+        'COUNTRY_ID': [country_1]
+    })
+    
+    # Write to Snowflake
+    schema = 'DBO'
+    database = 'PRICEPRODUCTSCRAPPERDB'
+    table_name = 'SOURCE_FILE'
+    
+    success, num_chunks, num_rows, _ = write_pandas(
+        conn=snowflake_cn,
+        df=data,
+        table_name=table_name.upper(),
+        database=database,
+        schema=schema
+    )
+    
+    query = f"Select Source_File_ID from Source_file where Source_File_name='{f_name}'"
+    cursor.execute(query)
+    df_fname = cursor.fetch_pandas_all()
+    source_file_ID = df_fname['SOURCE_FILE_ID'].values[0]
+    
+    snowflake_cn.close()
+    return source_file_ID, source_1, country_1
+
+def get_area_data(source_1, country_1):
+    """Get area data from Snowflake based on source and country"""
+    query = f"""SELECT * from area 
+                where area_id in (
+                    select area_id from Area_Source_Country 
+                    where source_id={source_1} and country_id={country_1}
+                );"""
+    
+    snowflake_cn = get_snowflake_connection()
+    cursor = snowflake_cn.cursor()
+    cursor.execute(query)
+    
+    df_zone = pd.DataFrame.from_records(iter(cursor), columns=[x[0] for x in cursor.description])
+    df_zone = df_zone.reset_index(drop=True).reset_index()
+    df_zone = df_zone[df_zone['index'] % int(scrapper_number) == int(scrapper_id)].reset_index(drop=True)
+    
+    snowflake_cn.close()
+    return df_zone
+
+def load_stores_data():
+    """Load and filter stores data based on scraper configuration"""
+    try:
+        stores = pd.read_csv('Everli_Italy_Seller_List_Needed.csv')
+    except FileNotFoundError:
+        print("Warning: Everli_Italy_Seller_List_Needed.csv not found. Please ensure the file exists.")
+        stores = pd.DataFrame() 
+    
+    if not stores.empty:
+        stores = stores.reset_index()
+        stores = stores[stores['index'] % int(scrapper_number) == int(scrapper_id)].reset_index(drop=True)
+    
+    return stores
+
 def main_execution():
+    """Enhanced main execution with Snowflake integration"""
+    print(f"Initializing scraper {scrapper_id} of {scrapper_number} for {src} in {country}")
+    print(f"Using timezone: {zone_dubai}")
+    print(f"Device: {device_name}, User: {user_name}")
+    
+    source_file_ID, source_1, country_1 = initialize_source_file()
+    print(f"Source file ID: {source_file_ID}")
+    
+    df_zone = get_area_data(source_1, country_1)
+    print(f"Found {len(df_zone)} areas to process")
+    
+    stores = load_stores_data()
+    if stores.empty:
+        print("No stores data found. Exiting.")
+        return
+    
+    print(f"Processing {len(stores)} stores")
+    
     start_index = 0
     stores_done = []
-    master_csv_path = "DataProducts.csv"
-    checkpoint_file = "scraper_checkpoint.json"
+    master_csv_path = "Data_Products_Eveli.csv"
+    checkpoint_file = "Everli_checkpoint.json"
     data_products = pd.DataFrame()
+    
     bot = EverliRegistrationBot()
     bot.logger.log_job_start()
     total_data_size = 0
 
-    # Load checkpoint if exists
     checkpoint = {'store_index': 0, 'category_index': 0, 'last_processed_product_id': None}
     if os.path.exists(checkpoint_file):
         try:
             with open(checkpoint_file, 'r') as f:
                 checkpoint = json.load(f)
             start_index = checkpoint['store_index']
-            bot.logger.log_info(f"Loaded checkpoint: Starting from store index {start_index}, category index {checkpoint['category_index']}")
         except Exception as e:
             bot.logger.log_warning(f"Failed to load checkpoint: {e}. Starting from scratch.")
-    # Load existing products to prevent duplicates
-    existing_products = set()
-    if os.path.exists(master_csv_path):
-        try:
-            existing_df = pd.read_csv(master_csv_path)
-            if 'id' in existing_df.columns:
-                existing_products = set(existing_df['id'].astype(str))
-            bot.logger.log_info(f"Loaded {len(existing_products)} existing product IDs from {master_csv_path}")
-        except Exception as e:
-            bot.logger.log_warning(f"Failed to load existing products: {e}")
-    # Obtain authentication token
+
     authentication_token = bot.register_and_confirm()
     if not authentication_token or authentication_token == 'null':
         bot.logger.log_error("Failed to obtain valid vAuthToken. Exiting.")
         bot.logger.log_job_end(total_data_size)
         return
+
     bot.logger.log_success(f"vAuthToken obtained successfully: {authentication_token}")
     headers = bot.get_headers_for_request(authentication_token)
+
     while start_index < len(stores):
         i = start_index
         start_time = datetime.now()
-        bot.logger.log_info(f"Start processing Store {i} - {stores['name'][i]}")
+        
+        current_store_name = stores['name'].iloc[i]
+        current_store_id = stores['id'].iloc[i]
+        bot.logger.log_info(f"Processing Store {i} - {current_store_name} (ID:{current_store_id})")
+
         try:
             product_full_batch = pd.DataFrame()
-            area_id = stores['area_id'][i]
-            url_id = stores['Url_id'][i]
-            currency_id = stores['currency_id'][i]
-            country_id = stores['country_id'][i]
-            src_id = stores['src_id'][i]
-            store_link = stores['link'][i].replace('everli://app', '')
+            area_id = stores['area_id'].iloc[i]
+            url_id = stores['Url_id'].iloc[i]
+            currency_id = stores['currency_id'].iloc[i]
+            country_id = stores['country_id'].iloc[i]
+            src_id = stores['src_id'].iloc[i]
+            store_link = stores['link'].iloc[i].replace('everli://app', '')
+            store_name = stores['name'].iloc[i]
+            store_id = stores['id'].iloc[i]
+            
             page = f"https://api.everli.com/sm/api/v3/{store_link}/categories/tree"
-            # Make API request for categories
+            
             resp = requests.get(page, headers=headers)
             if resp.status_code == 429:
                 bot.logger.log_error("Got 429 error at store level. Refreshing token and retrying.")
@@ -771,10 +932,13 @@ def main_execution():
                     continue
                 else:
                     raise Exception("Failed to refresh authentication token")
+            
             if resp.status_code != 200:
                 raise Exception(f"Blocked or invalid token (status {resp.status_code})")
+            
             categories_json = resp.json()
             categories_list = []
+            
             for h in range(len(categories_json['data']['menu'])):
                 if 'items' in categories_json['data']['menu'][h]:
                     ind = h
@@ -784,22 +948,30 @@ def main_execution():
                         categories_list.append({'name': parent_name, 'link': cat['link'], 'parent_name': ''})
                         for sub_cat in cat.get('branch', []):
                             categories_list.append({'name': sub_cat['name'], 'link': sub_cat['link'], 'parent_name': parent_name})
+            
             categories_df = pd.DataFrame(categories_list)
             categories_df = categories_df[categories_df['parent_name'] != ''].reset_index(drop=True)
             bot.logger.log_success(f"Categories found: {len(categories_df)}")
+            
             products_from_all_categories = pd.DataFrame()
-            # Start from checkpoint category index
+            
             j = checkpoint.get('category_index', 0)
+            total_products_found = 0
+            total_products_processed = 0
+            
             while j < len(categories_df):
                 try:
-                    bot.logger.set_context(category=cat, subcategory=sub_cat)
                     bot.logger.log_info(f"Scraping category {j+1}/{len(categories_df)} - {categories_df.loc[j, 'name']}")
                     cat = categories_df.loc[j, 'parent_name']
                     sub_cat = categories_df.loc[j, 'name']
+                    bot.logger.set_context(category=cat, subcategory=sub_cat)
+                    
                     cat_link = categories_df.loc[j, 'link'].replace('#/', '')
                     params = {'take': '100000000', 'skip': '0'}
                     time.sleep(1.5)
+                    
                     prod_resp = requests.get(f"https://api.everli.com/sm/api/v3/{cat_link}", params=params, headers=headers)
+                    
                     if prod_resp.status_code == 429:
                         bot.logger.log_debug(f"429 error at category {j} — refreshing token and retrying")
                         if bot.refresh_authentication():
@@ -808,39 +980,48 @@ def main_execution():
                             continue
                         else:
                             raise Exception("Failed to refresh authentication token")
+                    
                     prod_resp.raise_for_status()
                     prod_data = prod_resp.json()
                     subcategory_products = pd.DataFrame()
-                    # Process products in the category
+                    
                     product_list = []
                     for block in prod_data['data']['body']:
                         if block.get('widget_type') == 'vertical-list':
                             product_list.extend(block.get('list', []))
-                    # Filter out already processed products
+                    
+                    total_products_found += len(product_list)
+                    
                     start_processing = True if not checkpoint.get('last_processed_product_id') else False
-                    products_processed=0
+                    products_processed_in_category = 0
+                    
                     for product in product_list:
                         product_id = str(product.get('id'))
-                        if product_id == checkpoint.get('last_processed_product_id'):
-                            start_processing = True
-                            continue
-                        if start_processing and product_id not in existing_products:
-                            product_df = pd.json_normalize([product])
-                            product_df['cat_name_org'] = cat
-                            product_df['sub_cat_name_org'] = sub_cat
-                            product_df['nw'] = datetime.now(zone_dubai).strftime("%Y-%m-%d %H:%M:%S")
-                            subcategory_products = pd.concat([subcategory_products, product_df])
-                            existing_products.add(product_id)
-                            products_processed += 1
-
+                        
+                        if not start_processing:
+                            if product_id == checkpoint.get('last_processed_product_id'):
+                                start_processing = True
+                                continue  
+                            else:
+                                continue  
+                        
+                        product_df = pd.json_normalize([product])
+                        product_df['cat_name_org'] = cat
+                        product_df['sub_cat_name_org'] = sub_cat
+                        product_df['nw'] = datetime.now(zone_dubai).strftime("%Y-%m-%d %H:%M:%S")
+                        subcategory_products = pd.concat([subcategory_products, product_df])
+                        products_processed_in_category += 1
+                        total_products_processed += 1
 
                     if not subcategory_products.empty:
                         products_from_all_categories = pd.concat([products_from_all_categories, subcategory_products])
                         product_size = len(subcategory_products.to_csv(index=False).encode('utf-8'))
                         total_data_size += product_size
-                        bot.logger.log_success(f"Processed {products_processed} products from category {sub_cat}", 
+                        bot.logger.log_success(f"Processed {products_processed_in_category} products from category {sub_cat}", 
                                              data_size=product_size)
-                    # Update checkpoint after each category
+                    else:
+                        bot.logger.log_info(f"No products processed from category {sub_cat} (likely checkpoint resumption)")
+                    
                     checkpoint = {
                         'store_index': i,
                         'category_index': j + 1,
@@ -850,17 +1031,19 @@ def main_execution():
                         json.dump(checkpoint, f)
                     bot.logger.log_debug(f"Updated checkpoint: store {i}, category {j+1}")
                     j += 1
+                    
                 except Exception as e:
                     bot.logger.log_error(f"Error at category {j}: {str(e)}")
-                    # Save checkpoint with last processed product
-                    if subcategory_products.empty:
-                        checkpoint['last_processed_product_id'] = None
-                    else:
+                    
+                    if not subcategory_products.empty:
                         last_product_id = str(subcategory_products['id'].iloc[-1]) if 'id' in subcategory_products.columns else None
                         checkpoint['last_processed_product_id'] = last_product_id
+                        bot.logger.log_info(f"Saved checkpoint at product {last_product_id}")
+                    
                     with open(checkpoint_file, 'w') as f:
                         json.dump(checkpoint, f)
                     bot.logger.log_debug(f"Checkpoint saved due to error: {checkpoint}")
+                    
                     if "429" in str(e):
                         bot.logger.log_error("Got 429 error at category level. Refreshing token.")
                         if bot.refresh_authentication():
@@ -889,17 +1072,22 @@ def main_execution():
                             with open(checkpoint_file, 'w') as f:
                                 json.dump(checkpoint, f)
                             break
+
+            bot.logger.log_info(f"STORE {i} ({current_store_name}) COMPLETED:")
+            bot.logger.log_info(f"  - Total products found: {total_products_found}")
+            bot.logger.log_info(f"  - Total products processed: {total_products_processed}")
+
             if not products_from_all_categories.empty:
                 product_full_batch = products_from_all_categories.copy()
-                product_full_batch['store_name'] = stores['name'][i]
-                product_full_batch['store_id'] = stores['id'][i]
-                product_full_batch['source_file_id'] = source_file_ID
+                product_full_batch['store_name'] = store_name
+                product_full_batch['store_id'] = store_id
+                product_full_batch['source_file_id'] = source_file_ID 
                 product_full_batch['url_id'] = url_id
                 product_full_batch['currency_id'] = currency_id
                 product_full_batch['area_id'] = area_id
                 product_full_batch['country_id'] = country_id
                 product_full_batch['src_id'] = src_id
-                # Append to CSV
+                
                 product_full_batch.to_csv(
                     master_csv_path,
                     mode='a',
@@ -912,19 +1100,22 @@ def main_execution():
                                      data_size=batch_size)
                 stores_done.append(i)
             else:
-                bot.logger.log_error(f"No data saved for store {i}: empty product set")
+                bot.logger.log_warning(f"No new data saved for store {i}: no products found")
 
             duration = round((datetime.now() - start_time).total_seconds() / 60, 2)
             bot.logger.log_info(f"Duration for store {i}: {duration} min")
+            
             start_index += 1
             checkpoint = {'store_index': start_index, 'category_index': 0, 'last_processed_product_id': None}
             with open(checkpoint_file, 'w') as f:
                 json.dump(checkpoint, f)
+                
         except Exception as e:
             bot.logger.log_error(f"Critical error at store {i}: {str(e)}")
             checkpoint['store_index'] = i
             with open(checkpoint_file, 'w') as f:
                 json.dump(checkpoint, f)
+            
             if "429" in str(e):
                 bot.logger.log_error("Got 429 error at store level. Refreshing token and retrying.")
                 if bot.refresh_authentication():
@@ -951,8 +1142,11 @@ def main_execution():
                     checkpoint = {'store_index': start_index, 'category_index': 0, 'last_processed_product_id': None}
                     with open(checkpoint_file, 'w') as f:
                         json.dump(checkpoint, f)
+
     bot.logger.log_job_end(total_data_size)
-   
+    print(f"Scraping completed. Total stores processed: {len(stores_done)}")
+    print(f"Total data size: {total_data_size} bytes")
+
 
 if __name__ == "__main__":
     main_execution()
