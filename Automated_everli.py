@@ -19,6 +19,7 @@ import secrets
 import pytz
 from snowflake.connector import connect
 from snowflake.connector.pandas_tools import write_pandas
+from dotenv import load_dotenv,find_dotenv
 
 zone_dubai = pytz.timezone('Europe/Paris') 
 user_name = 'eBench'
@@ -29,15 +30,28 @@ ctry = country
 scrapper_id = '0'
 scrapper_number = '1'
 
+dotenv_path = find_dotenv()
+
+if dotenv_path:
+
+    print(f".env file found at: {dotenv_path}")
+
+    load_dotenv(dotenv_path) 
+
+else:
+
+    print("No .env file found. Make sure it exists in the project directory.")
+
 SNOWFLAKE_CONFIG = {
-    'user': "pythonscrapper",
-    'password': 'frec3Wo3--4Zu3owr2Ne',
-    'role': "PYTHON_SCRAPPER_ROLE",
-    'account': "sawueyh-fe32383",
-    'database': 'PRICEPRODUCTSCRAPPERDB',
-    'warehouse': "PYTHON_SCRAPPER_WAREHOUSE",
-    'schema': "DBO"
+   'user': os.getenv('USER'),
+   'password': os.getenv('PASSWORD'),
+   'role': os.getenv('ROLE'),
+   'account': os.getenv('ACCOUNT'),
+   'database': os.getenv('DATABASE'),
+   'warehouse': os.getenv('WAREHOUSE'),
+   'schema': os.getenv('SCHEMA')
 }
+ 
 
 class SimplifiedTokenExtractor:    
     def __init__(self, page, logger):
