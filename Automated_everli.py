@@ -19,8 +19,6 @@ import secrets
 import pytz
 from snowflake.connector import connect
 from snowflake.connector.pandas_tools import write_pandas
-from dotenv import load_dotenv
-load_dotenv()
 
 zone_dubai = pytz.timezone('Europe/Paris') 
 user_name = 'eBench'
@@ -32,13 +30,13 @@ scrapper_id = '0'
 scrapper_number = '1'
 
 SNOWFLAKE_CONFIG = {
-   'user': os.getenv('SNOWFLAKE_USER'),
-   'password': os.getenv('SNOWFLAKE_PASSWORD'),
-   'role': os.getenv('SNOWFLAKE_ROLE'),
-   'account': os.getenv('SNOWFLAKE_ACCOUNT'),
-   'database': os.getenv('SNOWFLAKE_DATABASE'),
-   'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE'),
-   'schema': os.getenv('SNOWFLAKE_SCHEMA')
+    'user': "pythonscrapper",
+    'password': 'frec3Wo3--4Zu3owr2Ne',
+    'role': "PYTHON_SCRAPPER_ROLE",
+    'account': "sawueyh-fe32383",
+    'database': 'PRICEPRODUCTSCRAPPERDB',
+    'warehouse': "PYTHON_SCRAPPER_WAREHOUSE",
+    'schema': "DBO"
 }
 
 class SimplifiedTokenExtractor:    
@@ -775,6 +773,7 @@ def get_snowflake_connection():
 def initialize_source_file():
     """Initialize source file in Snowflake and return source_file_ID"""
     
+    # Get URL and source information from Snowflake
     query = f"""SELECT u.*,s.Source_name, c.Country_Code 
                 from Url u 
                 left join Source s on u.Source_ID=s.Source_ID 
@@ -788,6 +787,7 @@ def initialize_source_file():
     df = pd.DataFrame.from_records(iter(cursor), columns=[x[0] for x in cursor.description])
     df = df.reset_index(drop=True).reset_index()
     
+    # Generate file name with timestamp
     now = datetime.now(zone_dubai)
     nw = str(now.year) + 'y' + str(now.month) + 'm' + str(now.day) + 'd' + ' ' + str(now.hour) + 'h' + str(now.minute) + 'm' + str(now.second) + 's'
     f_name = nw + 'multitest' + src.replace(' ', '') + '' + ctry + '_' + scrapper_id + '.csv'
@@ -795,6 +795,7 @@ def initialize_source_file():
     source_1 = str(df['SOURCE_ID'].values[0])
     country_1 = str(df['COUNTRY_ID'].values[0])
     
+    # Create source file record
     data = pd.DataFrame({
         'SOURCE_FILE_NAME': [f_name],
         'SOURCE_ID': [source_1],
@@ -814,6 +815,7 @@ def initialize_source_file():
         schema=schema
     )
     
+    # Get the generated source_file_ID
     query = f"Select Source_File_ID from Source_file where Source_File_name='{f_name}'"
     cursor.execute(query)
     df_fname = cursor.fetch_pandas_all()
@@ -847,7 +849,7 @@ def load_stores_data():
         stores = pd.read_csv('Everli_Italy_Seller_List_Needed.csv')
     except FileNotFoundError:
         print("Warning: Everli_Italy_Seller_List_Needed.csv not found. Please ensure the file exists.")
-        stores = pd.DataFrame() 
+        stores = pd.DataFrame()  # Empty dataframe as fallback
     
     if not stores.empty:
         stores = stores.reset_index()
@@ -857,16 +859,20 @@ def load_stores_data():
 
 def main_execution():
     """Enhanced main execution with Snowflake integration"""
+    # Initialize Snowflake data
     print(f"Initializing scraper {scrapper_id} of {scrapper_number} for {src} in {country}")
     print(f"Using timezone: {zone_dubai}")
     print(f"Device: {device_name}, User: {user_name}")
     
+    # Initialize source file and get IDs
     source_file_ID, source_1, country_1 = initialize_source_file()
     print(f"Source file ID: {source_file_ID}")
     
+    # Get area data
     df_zone = get_area_data(source_1, country_1)
     print(f"Found {len(df_zone)} areas to process")
     
+    # Load stores data
     stores = load_stores_data()
     if stores.empty:
         print("No stores data found. Exiting.")
@@ -893,6 +899,7 @@ def main_execution():
         except Exception as e:
             bot.logger.log_warning(f"Failed to load checkpoint: {e}. Starting from scratch.")
 
+    # Obtain authentication token
     authentication_token = bot.register_and_confirm()
     if not authentication_token or authentication_token == 'null':
         bot.logger.log_error("Failed to obtain valid vAuthToken. Exiting.")
